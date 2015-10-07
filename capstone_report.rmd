@@ -1,0 +1,248 @@
+---
+title: "DS Capstone Project Milestone Report"
+author: "Kyle Tan"
+date: "Friday, October 02, 2015"
+output: html_document
+---
+
+#### Objectives
+This report documents the steps taken to load, clean, explore and prepare the SWIFTKEY dataset for eventual modeling of the "next word" prediction algorithm.
+
+---
+
+#### 01 Load R Dependencies
+The required R libraries are preloaded.
+```{r load_lib, results='hide', cache=TRUE}
+# load libraries
+library(dplyr)
+library(stringi)
+library(tm)
+library(RWeka)
+library(ggplot2)
+library(wordcloud)
+```
+---
+
+#### 01 Download Data Files
+The SWIFTKEY dataset is downloaded.
+```{r down_fil, results='hide', cache=TRUE}
+# download data file
+if (!file.exists("01_raw/Coursera-SwiftKey.zip")) {
+    download.file("https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip", 
+        destfile = "01_raw/Coursera-SwiftKey.zip")
+}
+# unzip data file
+if (!file.exists("01_raw/final/en_US/en_US.blogs.txt")) {
+    unzip("01_raw/Coursera-SwiftKey.zip", exdir = "01_raw")
+}
+```
+---
+
+#### 02 Import Raw Data
+The 3 data files are loaded.
+```{r imp_raw, results="hide", cache=TRUE, warning=FALSE}
+# load blogs dataset
+blogs_file <- file("01_raw/final/en_US/en_US.blogs.txt", "rb")
+blogs <- readLines(blogs_file, encoding="UTF-8")
+close(blogs_file)
+
+# load news dataset
+news_file <- file("01_raw/final/en_US/en_US.news.txt", "rb")
+news <- readLines(news_file, encoding="UTF-8")
+close(news_file)
+
+# load twitter dataset
+twitter_file <- file("01_raw/final/en_US/en_US.twitter.txt", "rb")
+twitter <- readLines(twitter_file, encoding="UTF-8")
+close(twitter_file)
+```
+---
+
+#### 03 Intitial Data Exploration
+Twitter has the highest number of lines (2,360,148) but the lowest number of words per line (12.75). All 3 files have the same number of words (37,570,839).
+```{r expl_data1, results="show", cache=TRUE}
+# word count
+raw_wpl <- sapply(list(blogs,news,twitter), stri_count_words)
+
+# general statistical summary
+raw_summ <- data.frame(
+                RawFile = c("blogs","news","twitter"),
+                t(sapply(list(blogs,news,twitter), stri_stats_general)),
+                Words = t(sapply(list(blogs,news,twitter), stri_stats_latex)[4]),
+                WPL = rbind(summary(raw_wpl[[1]]),summary(raw_wpl[[2]]),summary(raw_wpl[[3]]))
+        )
+print(raw_summ)
+```
+```{r remove_data_0, echo=FALSE, cache=TRUE}
+# remove redundant data to free memory
+rm(raw_wpl, raw_summ)
+```
+---
+
+#### 04 Sample Data
+1% of lines from each file is sampled, and resulting word chunk contains 1,029,958 words.
+```{r sample_data, cache=TRUE}
+set.seed(88888)
+sampleSize <- 0.01 # 1% sampling
+blogs_Sample <- sample(blogs, length(blogs)*sampleSize, replace=FALSE)
+news_Sample <- sample(news, length(news)*sampleSize, replace=FALSE)
+twitter_Sample <- sample(twitter, length(twitter)*sampleSize, replace=FALSE)
+words_Sample <- c(blogs_Sample, news_Sample, twitter_Sample)
+sum(stri_count_words(words_Sample))
+```
+```{r remove_data_3, echo=FALSE, cache=TRUE}
+# remove redundant data to free memory
+rm(blogs_Sample, news_Sample, twitter_Sample, sampleSize)
+```
+---
+
+#### 05 Cleaning Data
+A Text Corpus (structured set of texts) is created from the character vector. The following pre-processing is being performed to clean the data:
+
+1. remove ASCII and Latin characters
+2. convert to lower case
+3. remove stopwords (e.g. the, its, a)
+4. remove vulgarities *
+5. remove punctuations
+6. remove numbers
+7. eliminating extra whitespace
+
+*List of profanities from (https://gist.github.com/tjrobinson/2366772) loaded for cleaning data.
+```{r clean_data, results="hide", cache=TRUE}
+createCorpus <- function(char_Vector) { 
+        # reads from a vector source to create a 'volatile corpus'
+        corpus <- VCorpus(VectorSource(char_Vector))
+}
+cleanCorpus <- function(corpus) { 
+        # remove ASCII and Latin characters (enables conversion to lower case)
+        corpus <- tm_map(corpus, content_transformer( function(x) iconv(x, "latin1", "ASCII", sub="") ) )
+        # convert to lower case
+        corpus <- tm_map(corpus, content_transformer(tolower))
+        # remove stopwords
+        corpus <- tm_map(corpus, removeWords, stopwords("english"))
+        # remove vulgarities
+        corpus <- tm_map(corpus, removeWords, profanity)
+        # remove punctuations
+        corpus <- tm_map(corpus, removePunctuation)
+        # remove numbers
+        corpus <- tm_map(corpus, removeNumbers)
+        # eliminating extra whitespace
+        corpus <- tm_map(corpus, stripWhitespace)
+}
+# load profanity list
+profanity_file <- file("01_raw/profanity_list.txt", "rb")
+profanity <- readLines(profanity_file, encoding="UTF-8")
+close(profanity_file)
+# create Corpus
+text_Corpus <- createCorpus(words_Sample)
+# clean Corpus
+text_Corpus <- cleanCorpus(text_Corpus)
+```
+```{r remove_data_1, echo=FALSE, cache=TRUE}
+# remove redundant data to free memory
+rm(profanity_file, profanity, words_Sample)
+```
+---
+
+#### 06 Tokenize Data
+The Text Corpus is Tokenized to form a Text Document Matrix (TDM - matrix of Terms and their frequencies across each document/line). The frequency of each term is then counted from the TDM. 
+```{r tokenize, results="hide", cache=TRUE}
+# Tokenizer Functions
+BigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 2, max = 2))
+TrigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 3, max = 3))
+QuadgramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 4, max = 4))
+# Count Document Matrix Freq Functions
+countTermFreq <- function(TDM, sparse_level){
+        # remove sparse rows
+        TDM1 <- removeSparseTerms(TDM, sparse_level)
+        # sum across row to get total freq for each Term
+        freq_terms <- sort(rowSums(as.matrix(TDM1)), decreasing=TRUE)
+        # return data frame of words + freq count
+        freq_df <- data.frame(word=names(freq_terms), freq=freq_terms)
+        return(freq_df)
+}
+# constructs term document matrix (describing freq of terms)
+TDM_1gram <- TermDocumentMatrix(text_Corpus)
+TDM_2gram <- TermDocumentMatrix(text_Corpus, control = list(tokenize = BigramTokenizer))
+TDM_3gram <- TermDocumentMatrix(text_Corpus, control = list(tokenize = TrigramTokenizer))
+TDM_4gram <- TermDocumentMatrix(text_Corpus, control = list(tokenize = QuadgramTokenizer))
+# counts freq of terms 
+freq_1gram <- countTermFreq(TDM_1gram, 0.99)
+freq_2gram <- countTermFreq(TDM_2gram, 0.9993)
+freq_3gram <- countTermFreq(TDM_3gram, 0.9999)
+freq_4gram <- countTermFreq(TDM_4gram, 0.99995)
+```
+```{r remove_data_2, echo=FALSE, cache=TRUE}
+# remove redundant data to free memory
+rm(text_Corpus, TDM_1gram, TDM_2gram, TDM_3gram, TDM_4gram)
+```
+---
+
+#### 07 Exploratory Analysis
+Frequency plot and Word Cloud are made for: Unigram, Bigram, Trigram and Quadgram.
+```{r expl_data2, results="hide", cache=TRUE, warning=FALSE}
+## 1gram frequency
+freq_1gram_top20 <- slice(freq_1gram, 1:20)
+ggplot(freq_1gram_top20, aes(x=reorder(word,freq), y=freq, fill=freq)) +
+        geom_bar(stat="identity") +
+        theme_bw() +
+        coord_flip() +
+        labs(x="Words", y="Frequency", title="Unigram Frequency")
+## 1gram word cloud
+wordcloud(freq_1gram$word, freq_1gram$freq, max.words=200, colors=brewer.pal(9,"Set1"))
+
+## 2gram frequency
+freq_2gram_top20 <- slice(freq_2gram, 1:20)
+ggplot(freq_2gram_top20, aes(x=reorder(word,freq), y=freq, fill=freq)) +
+        geom_bar(stat="identity") +
+        theme_bw() +
+        coord_flip() +
+        labs(x="Words", y="Frequency", title="Bigram Frequency")
+## 2gram word cloud
+wordcloud(freq_2gram$word, freq_2gram$freq, max.words=200, colors=brewer.pal(9,"Set1"))
+
+## 3gram frequency
+freq_3gram_top20 <- slice(freq_3gram, 1:20)
+ggplot(freq_3gram_top20, aes(x=reorder(word,freq), y=freq, fill=freq)) +
+        geom_bar(stat="identity") +
+        theme_bw() +
+        coord_flip() +
+        labs(x="Words", y="Frequency", title="Trigram Frequency")
+## 3gram word cloud
+wordcloud(freq_3gram$word, freq_3gram$freq, max.words=200, colors=brewer.pal(9,"Set1"))
+
+## 4gram frequency
+freq_4gram_top20 <- slice(freq_4gram, 1:20)
+ggplot(freq_4gram_top20, aes(x=reorder(word,freq), y=freq, fill=freq)) +
+        geom_bar(stat="identity") +
+        theme_bw() +
+        coord_flip() +
+        labs(x="Words", y="Frequency", title="Quadgram Frequency")
+## 4gram word cloud
+wordcloud(freq_4gram$word, freq_4gram$freq, max.words=200, colors=brewer.pal(9,"Set1"))
+```
+```{r remove_data_4, echo=FALSE, cache=TRUE}
+# remove redundant data to free memory
+rm(freq_1gram, freq_2gram, freq_3gram, freq_4gram)
+rm(freq_1gram_top20, freq_2gram_top20, freq_3gram_top20, freq_4gram_top20)
+```
+---
+
+```{r Appendix_and_Reference, echo=FALSE, eval=FALSE}
+# set wd
+setwd("C:/Users/IBM_ADMIN/Desktop/Kyle_Analytics/00_R/03_IDAMOCC_Data_Science_Specialization/10_Capstone/03_Project")
+
+# timing - user (outside kernel), sys (inside kernal), elapsed (wall clock)
+ptm <- proc.time()
+code_function_to_time()
+proc.time() - ptm
+
+# reference for tm_map
+tm_map tutorial: https://cran.r-project.org/web/packages/tm/vignettes/tm.pdf
+tm reference: https://cran.r-project.org/web/packages/tm/tm.pdf
+profanity list: https://gist.github.com/tjrobinson/2366772
+        
+# stemming (i.e. derive root forms) taken out as exploratory analysis will not read properly
+corpus <- tm_map(corpus, stemDocument)
+```
+
