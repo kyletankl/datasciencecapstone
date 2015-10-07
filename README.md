@@ -8,7 +8,9 @@ There are 3 Parts to the Capstone Project
 3. Capstone Presentation: Powerpoint on Modeling/WebApp
 
 Report: http://rpubs.com/kyletankl/capstone_report
+
 Shiny WebApp: https://kyletankl.shinyapps.io/place_holder
+
 Presentation: http://kyletankl.github.io/place_holder
 
 Current Git contains:
